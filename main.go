@@ -14,62 +14,48 @@ import (
 )
 
 const (
-	redisLuaIncrScript = `local v=redis.call("incrby",KEYS[1],1) if v==1 then redis.call("expire",KEYS[1],KEYS[2]) end return v`
-	rateLimitErrorMsg  = "rate limit exceeded"
-	runningMsg = "listening on port 8080"
+	redisLuaIncrScript  = `local v=redis.call("incrby",KEYS[1],1) if v==1 then redis.call("expire",KEYS[1],KEYS[2]) end return v`
+	rateLimitErrorMsg   = "rate limit exceeded"
+	rateLimitStatusCode = 503
+	runningMsg          = "reverse-proxy listening on port 8080"
 )
 
 var (
-	redisHost = os.Getenv("REDIS_HOST")
-	redisPort = os.Getenv("REDIS_POST")
-	targetUrl = os.Getenv("TARGET_URL")
+	backendUrl   = os.Getenv("BACKEND_URL")
+	redisHost    = os.Getenv("REDIS_HOST")
+	redisPort    = os.Getenv("REDIS_PORT")
 	intervalSecs = os.Getenv("INTERVAL_SECS")
-	limit = os.Getenv("LIMIT")
+	limit        = os.Getenv("LIMIT")
 )
 
 type rateLimitTransport struct {
-	limit int64
+	limit int
 	interval int
 	redisClient *redis.Client
 }
 
 func (t *rateLimitTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	ip, _, _ := net.SplitHostPort(req.RemoteAddr)
-	count, _ := t.redisClient.Eval(redisLuaIncrScript, []string{ip, strconv.Itoa(t.interval)}).Result()
-	if  count.(int64) > t.limit {
+	count, _ := t.redisClient.Eval(redisLuaIncrScript, []string{ip, strconv.Itoa(t.limit)}).Result()
+	if  count.(int64) > int64(t.limit) {
 		return &http.Response{
-			StatusCode: 503,
+			StatusCode: rateLimitStatusCode,
 			Body: ioutil.NopCloser(bytes.NewBufferString(rateLimitErrorMsg)),
 		}, nil
 	}
 	return http.DefaultTransport.RoundTrip(req)
 }
 
-func buildRedisClient() *redis.Client {
-	client := redis.NewClient(&redis.Options{
-		Addr:     fmt.Sprintf("%s:%s", redisHost, redisPort),
-		Password: "",
-		DB:       0,
-	})
-	client.FlushAll()
-	return client
-}
-
 func main() {
-	var err error
 	var transport rateLimitTransport
-	transport.redisClient = buildRedisClient()
-	transport.interval, err = strconv.Atoi(intervalSecs)
-	if err != nil {
-		panic(err)
-	}
-	transport.limit, err = strconv.ParseInt(limit, 10, 64)
-	if err != nil {
-		panic(err)
-	}
+	transport.redisClient = redis.NewClient(&redis.Options{
+		Addr: fmt.Sprintf("%s:%s", redisHost, redisPort),
+	})
+	transport.interval, _ = strconv.Atoi(intervalSecs)
+	transport.limit, _ = strconv.Atoi(limit)
 	var reverseProxy = &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
-			req.URL, _ = url.Parse(targetUrl)
+			req.URL, _ = url.Parse(backendUrl)
 			req.Host = req.URL.Host
 		},
 		Transport: &transport,
